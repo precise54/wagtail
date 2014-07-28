@@ -1,30 +1,25 @@
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
-
-class InvalidImageBackendError(ImproperlyConfigured):
-    pass
 
 
 class BaseImageBackend(object):
     def __init__(self, params):
         self.quality = getattr(settings, 'IMAGE_COMPRESSION_QUALITY', 85)
-        
+
     def open_image(self, input_file):
         """
-        Open an image and return the backend specific image object to pass 
-        to other methods. The object return has to have a size  attribute 
+        Open an image and return the backend specific image object to pass
+        to other methods. The object return has to have a size  attribute
         which is a tuple with the width and height of the image and a format
         attribute with the format of the image.
         """
         raise NotImplementedError('subclasses of BaseImageBackend must provide an open_image() method')
-        
-    
+
     def save_image(self, image, output):
         """
         Save the image to the output
         """
         raise NotImplementedError('subclasses of BaseImageBackend must provide a save_image() method')
-        
+
     def resize(self, image, size):
         """
         resize image to the requested size, using highest quality settings
@@ -32,10 +27,8 @@ class BaseImageBackend(object):
         """
         raise NotImplementedError('subclasses of BaseImageBackend must provide an resize() method')
 
-
     def crop_to_centre(self, image, size):
         raise NotImplementedError('subclasses of BaseImageBackend must provide a crop_to_centre() method')
-
 
     def resize_to_max(self, image, size):
         """
@@ -58,10 +51,8 @@ class BaseImageBackend(object):
             final_size = (target_width, int(original_height * horz_scale))
         else:
             final_size = (int(original_width * vert_scale), target_height)
-        
-        return self.resize(image, final_size)
-        
 
+        return self.resize(image, final_size)
 
     def resize_to_min(self, image, size):
         """
@@ -87,7 +78,6 @@ class BaseImageBackend(object):
 
         return self.resize(image, final_size)
 
-
     def resize_to_width(self, image, target_width):
         """
         Resize image down to the given width, preserving aspect ratio.
@@ -103,7 +93,6 @@ class BaseImageBackend(object):
         final_size = (target_width, int(original_height * scale))
 
         return self.resize(image, final_size)
-
 
     def resize_to_height(self, image, target_height):
         """
@@ -121,7 +110,6 @@ class BaseImageBackend(object):
 
         return self.resize(image, final_size)
 
-
     def resize_to_fill(self, image, size):
         """
         Resize down and crop image to fill the given dimensions. Most suitable for thumbnails.
@@ -130,3 +118,8 @@ class BaseImageBackend(object):
         """
         resized_image = self.resize_to_min(image, size)
         return self.crop_to_centre(resized_image, size)
+
+
+    def no_operation(self, image, param):
+        """Return the image unchanged"""
+        return image

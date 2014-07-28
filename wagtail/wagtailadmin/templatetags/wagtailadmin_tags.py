@@ -1,12 +1,15 @@
+from __future__ import unicode_literals
+
 from django import template
 from django.core import urlresolvers
 from django.utils.translation import ugettext_lazy as _
 
-from wagtail.wagtailadmin import hooks
 from wagtail.wagtailadmin.menu import MenuItem
 
-from wagtail.wagtailcore.models import get_navigation_menu_items, UserPagePermissionsProxy
-from wagtail.wagtailcore.util import camelcase_to_underscore
+from wagtail.wagtailcore import hooks
+from wagtail.wagtailcore.models import get_navigation_menu_items, UserPagePermissionsProxy, PageViewRestriction
+from wagtail.wagtailcore.utils import camelcase_to_underscore
+
 
 register = template.Library()
 
@@ -18,28 +21,17 @@ def explorer_nav():
     }
 
 
-@register.inclusion_tag('wagtailadmin/shared/explorer_nav.html')
+@register.inclusion_tag('wagtailadmin/shared/explorer_nav_child.html')
 def explorer_subnav(nodes):
     return {
         'nodes': nodes
     }
 
 
-@register.assignment_tag
-def get_wagtailadmin_tab_urls():
-    resolver = urlresolvers.get_resolver(None)
-    return [
-        (key, value[2].get("title", key))
-        for key, value
-        in resolver.reverse_dict.items()
-        if isinstance(key, basestring) and key.startswith('wagtailadmin_tab_')
-    ]
-
-
 @register.inclusion_tag('wagtailadmin/shared/main_nav.html', takes_context=True)
 def main_nav(context):
     menu_items = [
-        MenuItem(_('Explorer'), '#', classnames='icon icon-folder-open-inverse dl-trigger', order=100),
+        MenuItem(_('Explorer'), urlresolvers.reverse('wagtailadmin_explore_root'), classnames='icon icon-folder-open-inverse dl-trigger', order=100),
         MenuItem(_('Search'), urlresolvers.reverse('wagtailadmin_pages_search'), classnames='icon icon-search', order=200),
     ]
 
@@ -69,7 +61,10 @@ def fieldtype(bound_field):
     try:
         return camelcase_to_underscore(bound_field.field.__class__.__name__)
     except AttributeError:
-        return ""
+        try:
+            return camelcase_to_underscore(bound_field.__class__.__name__)
+        except AttributeError:
+            return ""
 
 
 @register.filter
@@ -96,6 +91,26 @@ def page_permissions(context, page):
     return context['user_page_permissions'].for_page(page)
 
 
+@register.assignment_tag(takes_context=True)
+def test_page_is_public(context, page):
+    """
+    Usage: {% test_page_is_public page as is_public %}
+    Sets 'is_public' to True iff there are no page view restrictions in place on
+    this page.
+    Caches the list of page view restrictions in the context, to avoid repeated
+    DB queries on repeated calls.
+    """
+    if 'all_page_view_restriction_paths' not in context:
+        context['all_page_view_restriction_paths'] = PageViewRestriction.objects.select_related('page').values_list('page__path', flat=True)
+
+    is_private = any([
+        page.path.startswith(restricted_path)
+        for restricted_path in context['all_page_view_restriction_paths']
+    ])
+
+    return not is_private
+
+
 @register.simple_tag
 def hook_output(hook_name):
     """
@@ -105,4 +120,4 @@ def hook_output(hook_name):
     Note that the output is not escaped - it is the hook function's responsibility to escape unsafe content.
     """
     snippets = [fn() for fn in hooks.get_hooks(hook_name)]
-    return u''.join(snippets)
+    return ''.join(snippets)

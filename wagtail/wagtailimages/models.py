@@ -1,23 +1,30 @@
-import StringIO
 import os.path
+import re
+
+from six import BytesIO
 
 from taggit.managers import TaggableManager
 
 from django.core.files import File
-from django.core.exceptions import ImproperlyConfigured, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import ImproperlyConfigured, ObjectDoesNotExist
 from django.db import models
 from django.db.models.signals import pre_delete
 from django.dispatch.dispatcher import receiver
 from django.utils.safestring import mark_safe
-from django.utils.html import escape
+from django.utils.html import escape, format_html_join
 from django.conf import settings
 from django.utils.translation import ugettext_lazy  as _
+from django.utils.encoding import python_2_unicode_compatible
 
 from unidecode import unidecode
 
 from wagtail.wagtailadmin.taggable import TagSearchable
 from wagtail.wagtailimages.backends import get_image_backend
+from wagtail.wagtailsearch import indexed
+from .utils import validate_image_format
 
+
+@python_2_unicode_compatible
 class AbstractImage(models.Model, TagSearchable):
     title = models.CharField(max_length=255, verbose_name=_('Title') )
 
@@ -34,12 +41,7 @@ class AbstractImage(models.Model, TagSearchable):
             filename = prefix[:-1] + dot + extension
         return os.path.join(folder_name, filename)
 
-    def file_extension_validator(ffile):
-        extension = ffile.name.split(".")[-1].lower()
-        if extension not in ["gif", "jpg", "jpeg", "png"]:
-            raise ValidationError(_("Not a valid image format. Please use a gif, jpeg or png file instead."))
-
-    file = models.ImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height', validators=[file_extension_validator])
+    file = models.ImageField(verbose_name=_('File'), upload_to=get_upload_to, width_field='width', height_field='height', validators=[validate_image_format])
     width = models.IntegerField(editable=False)
     height = models.IntegerField(editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -47,16 +49,11 @@ class AbstractImage(models.Model, TagSearchable):
 
     tags = TaggableManager(help_text=None, blank=True, verbose_name=_('Tags'))
 
-    indexed_fields = {
-        'uploaded_by_user_id': {
-            'type': 'integer',
-            'store': 'yes',
-            'indexed': 'no',
-            'boost': 0,
-        },
-    }
+    search_fields = TagSearchable.search_fields + (
+        indexed.FilterField('uploaded_by_user'),
+    )
 
-    def __unicode__(self):
+    def __str__(self):
         return self.title
 
     def get_rendition(self, filter):
@@ -70,8 +67,8 @@ class AbstractImage(models.Model, TagSearchable):
         except ObjectDoesNotExist:
             file_field = self.file
 
-			# If we have a backend attribute then pass it to process
-			# image - else pass 'default'
+            # If we have a backend attribute then pass it to process
+            # image - else pass 'default'
             backend_name = getattr(self, 'backend', 'default')
             generated_image_file = filter.process_image(file_field.file, backend_name=backend_name)
 
@@ -153,6 +150,7 @@ class Filter(models.Model):
         'width': 'resize_to_width',
         'height': 'resize_to_height',
         'fill': 'resize_to_fill',
+        'original': 'no_operation',
     }
 
     def __init__(self, *args, **kwargs):
@@ -160,22 +158,34 @@ class Filter(models.Model):
         self.method = None  # will be populated when needed, by parsing the spec string
 
     def _parse_spec_string(self):
-        # parse the spec string, which is formatted as (method)-(arg),
-        # and save the results to self.method_name and self.method_arg
-        try:
-            (method_name_simple, method_arg_string) = self.spec.split('-')
-            self.method_name = Filter.OPERATION_NAMES[method_name_simple]
+        # parse the spec string and save the results to
+        # self.method_name and self.method_arg. There are various possible
+        # formats to match against:
+        # 'original'
+        # 'width-200'
+        # 'max-320x200'
 
-            if method_name_simple in ('max', 'min', 'fill'):
-                # method_arg_string is in the form 640x480
-                (width, height) = [int(i) for i in method_arg_string.split('x')]
-                self.method_arg = (width, height)
-            else:
-                # method_arg_string is a single number
-                self.method_arg = int(method_arg_string)
+        if self.spec == 'original':
+            self.method_name = Filter.OPERATION_NAMES['original']
+            self.method_arg = None
+            return
 
-        except (ValueError, KeyError):
-            raise ValueError("Invalid image filter spec: %r" % self.spec)
+        match = re.match(r'(width|height)-(\d+)$', self.spec)
+        if match:
+            self.method_name = Filter.OPERATION_NAMES[match.group(1)]
+            self.method_arg = int(match.group(2))
+            return
+
+        match = re.match(r'(max|min|fill)-(\d+)x(\d+)$', self.spec)
+        if match:
+            self.method_name = Filter.OPERATION_NAMES[match.group(1)]
+            width = int(match.group(2))
+            height = int(match.group(3))
+            self.method_arg = (width, height)
+            return
+
+        # Spec is not one of our recognised patterns
+        raise ValueError("Invalid image filter spec: %r" % self.spec)
 
     def process_image(self, input_file, backend_name='default'):
         """
@@ -183,27 +193,25 @@ class Filter(models.Model):
         generate an output image with this filter applied, returning it
         as another django.core.files.File object
         """
-        
         backend = get_image_backend(backend_name)
-        
+
         if not self.method:
             self._parse_spec_string()
-        
+
         # If file is closed, open it
         input_file.open('rb')
         image = backend.open_image(input_file)
         file_format = image.format
-        
+
         method = getattr(backend, self.method_name)
 
         image = method(image, self.method_arg)
 
-        output = StringIO.StringIO()
+        output = BytesIO()
         backend.save_image(image, output, file_format)
-        
+
         # and then close the input file
         input_file.close()
-        
 
         # generate new filename derived from old one, inserting the filter spec string before the extension
         input_filename_parts = os.path.basename(input_file.name).split('.')
@@ -213,7 +221,6 @@ class Filter(models.Model):
         output_filename = '.'.join(output_filename_parts)
 
         output_file = File(output, name=output_filename)
-        
 
         return output_file
 
@@ -228,10 +235,18 @@ class AbstractRendition(models.Model):
     def url(self):
         return self.file.url
 
-    def img_tag(self):
+    @property
+    def attrs(self):
         return mark_safe(
-            '<img src="%s" width="%d" height="%d" alt="%s">' % (escape(self.url), self.width, self.height, escape(self.image.title))
+            'src="%s" width="%d" height="%d" alt="%s"' % (escape(self.url), self.width, self.height, escape(self.image.title))
         )
+
+    def img_tag(self, extra_attributes=None):
+        if extra_attributes:
+            extra_attributes_string = format_html_join(' ', '{0}="{1}"', extra_attributes.items())
+            return mark_safe('<img %s %s>' % (self.attrs, extra_attributes_string))
+        else:
+            return mark_safe('<img %s>' % self.attrs)
 
     class Meta:
         abstract = True

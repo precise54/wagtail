@@ -1,11 +1,8 @@
-from django import template
-from django.utils.safestring import mark_safe
+import warnings
 
-from wagtail.wagtailcore.rich_text import expand_db_html
+warnings.warn(
+    "The rich_text tag library has been moved to wagtailcore_tags. "
+    "Use {% load wagtailcore_tags %} instead.", DeprecationWarning)
 
-register = template.Library()
 
-
-@register.filter
-def richtext(value):
-    return mark_safe(expand_db_html(value))
+from wagtail.wagtailcore.templatetags.wagtailcore_tags import register, richtext
